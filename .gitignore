@@ -1,0 +1,39 @@
+# Environment & Secrets
+.env
+*.env.local
+
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data & Logs
+data/
+logs/
+*.log
+backups/
+
+# Docs (internal)
+docs/
+
+# Testing
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Docker volumes
+quant_redis_data/
+quant_pg_data/
+
+# OS
+.DS_Store
+Thumbs.db

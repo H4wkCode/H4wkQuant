@@ -1,0 +1,180 @@
+# H4wkQuant - Production Docker Compose
+# Designed by H4wk
+# Panel access via Tailscale IP (8180)
+# Same server as H4wkTrading, no port conflicts
+#
+# H4wkTrading ports: 5432, 6379, 8080, 9001-9007
+# H4wkQuant ports:   5432(internal), 6379/1(internal), 8180, 9101-9105, 9090(internal), 3001
+
+version: "3.8"
+
+services:
+  # ============================================================
+  # Infrastructure (isolated from H4wkTrading)
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: h4wkquant-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - quant_redis_data:/data
+    networks:
+      - quant-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: h4wkquant-postgres
+    environment:
+      POSTGRES_USER: h4wk
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: h4wk_quant
+    volumes:
+      - quant_pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    networks:
+      - quant-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U h4wk -d h4wk_quant"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================================
+  # Services
+  # ============================================================
+  data_collector:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.data_collector
+    container_name: h4wkquant-data-collector
+    environment:
+      SERVICE_NAME: data_collector
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      PANEL_SECRET_KEY: ${PANEL_SECRET_KEY:-default_secret}
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY:-}
+      BYBIT_API_KEY: ${BYBIT_API_KEY:-}
+      BYBIT_SECRET_KEY: ${BYBIT_SECRET_KEY:-}
+      BYBIT_ENABLED: ${BYBIT_ENABLED:-false}
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spread_engine:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.spread_engine
+    container_name: h4wkquant-spread-engine
+    environment:
+      SERVICE_NAME: spread_engine
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      BYBIT_ENABLED: ${BYBIT_ENABLED:-false}
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      data_collector:
+        condition: service_started
+    restart: unless-stopped
+
+  risk_manager:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.risk_manager
+    container_name: h4wkquant-risk-manager
+    environment:
+      SERVICE_NAME: risk_manager
+      REDIS_URL: redis://redis:6379/1
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  executor:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.executor
+    container_name: h4wkquant-executor
+    environment:
+      SERVICE_NAME: executor
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      PANEL_SECRET_KEY: ${PANEL_SECRET_KEY:-default_secret}
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY:-}
+      BYBIT_API_KEY: ${BYBIT_API_KEY:-}
+      BYBIT_SECRET_KEY: ${BYBIT_SECRET_KEY:-}
+      BYBIT_ENABLED: ${BYBIT_ENABLED:-false}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  watchdog:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.watchdog
+    container_name: h4wkquant-watchdog
+    environment:
+      SERVICE_NAME: watchdog
+      REDIS_URL: redis://redis:6379/1
+      MONITOR_TELEGRAM_ENABLED: ${MONITOR_TELEGRAM_ENABLED:-false}
+      MONITOR_TELEGRAM_BOT_TOKEN: ${MONITOR_TELEGRAM_BOT_TOKEN:-}
+      MONITOR_TELEGRAM_CHAT_ID: ${MONITOR_TELEGRAM_CHAT_ID:-}
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Panel - SINGLE EXTERNAL ACCESS POINT (via Tailscale)
+  panel:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.panel
+    container_name: h4wkquant-panel
+    environment:
+      SERVICE_NAME: panel
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      PANEL_SECRET_KEY: ${PANEL_SECRET_KEY:-default_secret}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+    ports:
+      - "8180:8180"
+    networks:
+      - quant-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  quant_redis_data:
+  quant_pg_data:
+
+networks:
+  quant-network:
+    driver: bridge

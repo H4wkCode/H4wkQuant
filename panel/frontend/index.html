@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>H4wkQuant - Arbitrage Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background: #0a0e17; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; }
+        .glass { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(56, 189, 248, 0.15); border-radius: 12px; backdrop-filter: blur(10px); }
+        .stat-card { transition: transform 0.2s; }
+        .stat-card:hover { transform: translateY(-2px); }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .zscore-bar { height: 8px; border-radius: 4px; background: #1e293b; position: relative; overflow: hidden; }
+        .zscore-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+        .trade-row:hover { background: rgba(56, 189, 248, 0.05); }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        .tab-active { border-bottom: 2px solid #38bdf8; color: #38bdf8; }
+        .tab-inactive { border-bottom: 2px solid transparent; color: #64748b; }
+        .tab-inactive:hover { color: #94a3b8; }
+        .script-output { background: #0f172a; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+        .login-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(10, 14, 23, 0.95); backdrop-filter: blur(20px); }
+        .setting-input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 100%; }
+        .setting-input:focus { outline: none; border-color: #38bdf8; }
+        .toast { position: fixed; top: 20px; right: 20px; z-index: 200; padding: 12px 20px; border-radius: 8px; font-size: 13px; animation: slideIn 0.3s ease; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .corr-cell { width: 50px; height: 30px; text-align: center; font-size: 10px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+<div id="app" class="min-h-screen">
+    <!-- Login Overlay -->
+    <div v-if="!isLoggedIn" class="login-overlay">
+        <div class="glass p-8 w-96">
+            <h1 class="text-2xl font-bold text-center mb-6 bg-gradient-to-r from-sky-400 to-cyan-300 bg-clip-text text-transparent">H4wkQuant</h1>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-slate-400 block mb-1">Username</label>
+                    <input v-model="loginForm.username" @keyup.enter="login" type="text" class="setting-input" placeholder="admin">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400 block mb-1">Password</label>
+                    <input v-model="loginForm.password" @keyup.enter="login" type="password" class="setting-input" placeholder="********">
+                </div>
+                <div v-if="loginError" class="text-red-400 text-xs">{{ loginError }}</div>
+                <button @click="login" class="w-full py-2 rounded bg-sky-600 hover:bg-sky-500 text-sm font-bold transition">Login</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div v-if="toast.show" class="toast" :class="toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'">{{ toast.message }}</div>
+
+    <!-- Header -->
+    <header v-if="isLoggedIn" class="glass border-b border-sky-500/20 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <h1 class="text-xl font-bold bg-gradient-to-r from-sky-400 to-cyan-300 bg-clip-text text-transparent">H4wkQuant</h1>
+            <span class="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400">ARB</span>
+            <span v-if="data.trading_mode === 'paper'" class="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">PAPER</span>
+            <span v-else class="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">LIVE</span>
+            <span v-if="warmup.phase === 'cold'" class="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400 pulse">COLD {{ warmup.elapsed }}</span>
+            <span v-else-if="warmup.phase === 'warming'" class="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-400">WARMING {{ warmup.elapsed }}</span>
+            <span v-else class="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">STABLE {{ warmup.elapsed }}</span>
+            <span v-if="regimeBadge" class="text-xs px-2 py-0.5 rounded font-bold" :class="regimeBadge.cls">{{ regimeBadge.label }}</span>
+            <!-- DB Status -->
+            <span class="w-2.5 h-2.5 rounded-full" :class="dbStatus === 'connected' ? 'bg-green-400' : 'bg-red-400'" :title="'DB: ' + dbStatus"></span>
+        </div>
+        <div class="flex items-center gap-3 text-sm">
+            <span class="text-slate-400">{{ currentTime }}</span>
+            <button @click="closeAllPositions" class="px-3 py-1 rounded text-xs font-bold bg-orange-600/80 hover:bg-orange-600 transition">CLOSE ALL</button>
+            <button @click="toggleKillSwitch" :class="data.kill_switch?.active ? 'bg-red-600 animate-pulse' : 'bg-slate-700'" class="px-3 py-1 rounded text-xs font-bold hover:opacity-80 transition">
+                {{ data.kill_switch?.active ? 'EMERGENCY ON' : 'EMERGENCY STOP' }}
+            </button>
+            <button @click="logout" class="px-3 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 transition">Logout</button>
+        </div>
+    </header>
+
+    <main v-if="isLoggedIn" class="p-4 max-w-[1400px] mx-auto">
+        <!-- Summary Cards -->
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Balance</div>
+                <div class="text-lg font-bold">${{ fmt(data.balance?.total_balance) }}</div>
+                <div class="text-xs text-slate-500">Available: ${{ fmt(data.balance?.available_balance) }}</div>
+            </div>
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Daily P&amp;L</div>
+                <div class="text-lg font-bold" :class="pnlColor(data.daily_pnl)">{{ data.daily_pnl >= 0 ? '+' : '' }}${{ fmt4(data.daily_pnl) }}</div>
+            </div>
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Total P&amp;L</div>
+                <div class="text-lg font-bold" :class="pnlColor(totalPnl)">{{ totalPnl >= 0 ? '+' : '' }}${{ fmt4(totalPnl) }}</div>
+                <div class="text-xs text-slate-500">{{ totalTrades }} trades</div>
+            </div>
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Positions</div>
+                <div class="text-lg font-bold">{{ posCount }} <span class="text-xs text-slate-500">/ 6</span></div>
+            </div>
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Drawdown</div>
+                <div class="text-lg font-bold" :class="data.drawdown_pct > 5 ? 'text-red-400' : data.drawdown_pct > 2 ? 'text-yellow-400' : 'text-green-400'">{{ fmt(data.drawdown_pct) }}%</div>
+                <div class="w-full bg-slate-700 rounded-full h-1.5 mt-1">
+                    <div class="h-1.5 rounded-full transition-all" :style="{width: Math.min(data.drawdown_pct * 10, 100)+'%'}" :class="data.drawdown_pct > 5 ? 'bg-red-500' : 'bg-sky-500'"></div>
+                </div>
+            </div>
+            <div class="glass p-3 stat-card">
+                <div class="text-xs text-slate-400 mb-1">Win Rate</div>
+                <div class="text-lg font-bold text-sky-400">{{ winRate }}%</div>
+                <div class="text-xs text-slate-500"><span class="text-green-400">{{ stats.wins || 0 }}K</span> / <span class="text-red-400">{{ stats.losses || 0 }}Z</span></div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div class="glass p-4 md:col-span-2">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Equity Curve</h2>
+                <div style="position:relative;height:180px;width:100%"><canvas ref="equityChart"></canvas></div>
+            </div>
+            <div class="glass p-4">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">P&amp;L Distribution</h2>
+                <div style="position:relative;height:180px;width:100%"><canvas ref="pnlChart"></canvas></div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="flex gap-4 mb-4 border-b border-slate-700/50 pb-0 overflow-x-auto">
+            <button v-for="tab in tabs" :key="tab.id" @click="activeTab = tab.id"
+                :class="activeTab === tab.id ? 'tab-active' : 'tab-inactive'"
+                class="pb-2 text-sm font-medium transition cursor-pointer whitespace-nowrap">
+                {{ tab.label }}
+            </button>
+        </div>
+
+        <!-- Tab: Overview -->
+        <div v-if="activeTab === 'overview'" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4" style="align-items: start;">
+            <div class="glass p-4" style="max-height: 480px; display: flex; flex-direction: column;">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Live Spread & Z-Score</h2>
+                <div style="overflow-y: auto; flex: 1;">
+                <div v-if="Object.keys(data.spreads || {}).length === 0" class="text-slate-500 text-sm">Waiting for price data...</div>
+                <div v-for="(spread, pair) in (data.spreads || {})" :key="pair" class="mb-4 last:mb-0">
+                    <div class="flex justify-between text-sm mb-1">
+                        <div class="flex items-center gap-2">
+                            <span class="text-slate-300 font-medium">{{ pair }}</span>
+                            <span v-if="spread.is_default" class="text-[10px] px-1 rounded bg-slate-700 text-slate-500">fixed</span>
+                            <span v-else class="text-[10px] px-1 rounded bg-sky-900 text-sky-400">scanned</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-mono text-sky-300">{{ spread.ratio }}</span>
+                            <button v-if="!spread.is_default" @click="removeScreenedPair(pair)" class="text-slate-600 hover:text-red-400 text-xs">x</button>
+                        </div>
+                    </div>
+                    <div class="flex gap-4 text-xs text-slate-400 mb-2">
+                        <span>{{ pair.split('/')[0] }}: ${{ fmt(spread.price_a) }}</span>
+                        <span>{{ pair.split('/')[1] }}: ${{ fmt(spread.price_b) }}</span>
+                    </div>
+                    <div class="zscore-bar">
+                        <div class="zscore-fill" :style="{width: Math.min(Math.abs(spread.zscore || 0) / 4 * 100, 100) + '%', background: zscoreGradient(spread.zscore || 0)}"></div>
+                    </div>
+                    <div class="flex justify-between items-center text-xs mt-1">
+                        <span class="text-slate-500">z={{ fmt(spread.zscore) }}</span>
+                        <div class="flex items-center gap-2">
+                            <span v-if="spread.half_life" class="text-slate-500">HL={{ spread.half_life }}m</span>
+                            <span v-if="data.positions?.[pair]" class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/20 text-green-400">{{ data.positions[pair].leg_a_side }}/{{ data.positions[pair].leg_b_side }}</span>
+                            <span v-else-if="Math.abs(spread.zscore||0) >= 2" class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 pulse">Signal</span>
+                            <span v-else class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-500">Waiting</span>
+                        </div>
+                    </div>
+                </div>
+                </div>
+            </div>
+            <div class="glass p-4" style="max-height: 480px; display: flex; flex-direction: column;">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Open Positions</h2>
+                <div style="overflow-y: auto; flex: 1;">
+                <div v-if="posCount === 0" class="text-slate-500 text-sm py-4 text-center">No open positions</div>
+                <div v-for="(pos, pair) in (data.positions || {})" :key="pair" class="mb-3 p-3 rounded-lg bg-slate-800/50 border border-slate-700/30">
+                    <div class="flex justify-between text-sm mb-2">
+                        <span class="font-bold">{{ pair }}</span>
+                        <span class="text-xs px-2 py-0.5 rounded" :class="{'bg-purple-500/20 text-purple-400': pos.strategy === 'stat_arb', 'bg-cyan-500/20 text-cyan-400': pos.strategy === 'funding_arb', 'bg-amber-500/20 text-amber-400': pos.strategy === 'momentum_div', 'bg-pink-500/20 text-pink-400': pos.strategy === 'cross_exchange'}">{{ strategyName(pos.strategy) }}</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="flex items-center gap-1">
+                            <span :class="pos.leg_a_side === 'LONG' ? 'text-green-400' : 'text-red-400'">{{ pos.leg_a_side }}</span>
+                            <span class="text-slate-300">{{ pos.leg_a_symbol }}</span>
+                            <span class="text-slate-500">@ {{ fmt(pos.leg_a_entry) }}</span>
+                        </div>
+                        <div class="flex items-center gap-1">
+                            <span :class="pos.leg_b_side === 'LONG' ? 'text-green-400' : 'text-red-400'">{{ pos.leg_b_side }}</span>
+                            <span class="text-slate-300">{{ pos.leg_b_symbol }}</span>
+                            <span class="text-slate-500">@ {{ fmt(pos.leg_b_entry) }}</span>
+                        </div>
+                    </div>
+                    <div class="flex justify-between text-xs mt-2">
+                        <span class="text-slate-500">Entry z: {{ fmt(pos.entry_zscore) }}</span>
+                        <span class="font-mono font-bold" :class="pnlColor(pos.live_pnl)">{{ pos.live_pnl != null ? (pos.live_pnl >= 0 ? '+' : '') + '$' + fmt4(pos.live_pnl) : '...' }}</span>
+                    </div>
+                    <div class="flex justify-between text-xs text-slate-500 mt-1">
+                        <span>Opened: {{ fmtTime(pos.entry_time) }}</span>
+                        <span>{{ posAge(pos.entry_time) }} ago</span>
+                    </div>
+                </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Signals -->
+        <div v-if="activeTab === 'signals'" class="glass p-4 mb-4">
+            <h2 class="text-sm font-bold text-sky-400 mb-3">Signal History</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-slate-400 border-b border-slate-700">
+                        <tr><th class="pb-2 text-left">Time</th><th class="pb-2 text-left">Action</th><th class="pb-2 text-left">Pair</th><th class="pb-2 text-left">Strategy</th><th class="pb-2 text-right">Z-Score</th><th class="pb-2 text-right">Edge</th><th class="pb-2 text-right">Confidence</th><th class="pb-2 text-right">Size $</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="sig in (data.signals || [])" :key="sig.timestamp" class="trade-row border-b border-slate-800/30">
+                            <td class="py-1.5 text-slate-500">{{ fmtTime(sig.timestamp) }}</td>
+                            <td class="py-1.5"><span :class="sig.action === 'open' ? 'text-green-400' : 'text-orange-400'" class="font-bold uppercase">{{ sig.action === 'open' ? 'OPEN' : 'CLOSE' }}</span></td>
+                            <td class="py-1.5 text-slate-300">{{ sig.pair_id }}</td>
+                            <td class="py-1.5 text-slate-400">{{ strategyName(sig.strategy) }}</td>
+                            <td class="py-1.5 text-right font-mono">{{ fmt(sig.zscore) }}</td>
+                            <td class="py-1.5 text-right font-mono" :class="pnlColor(sig.edge_net)">{{ fmt4(sig.edge_net) }}</td>
+                            <td class="py-1.5 text-right">%{{ (sig.confidence * 100).toFixed(0) }}</td>
+                            <td class="py-1.5 text-right">${{ fmt(sig.position_size_usd) }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div v-if="!data.signals?.length" class="text-slate-500 text-sm py-4 text-center">No signals yet</div>
+            </div>
+        </div>
+
+        <!-- Tab: Trades -->
+        <div v-if="activeTab === 'trades'" class="glass p-4 mb-4">
+            <h2 class="text-sm font-bold text-sky-400 mb-3">Trade History</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-slate-400 border-b border-slate-700">
+                        <tr><th class="pb-2 text-left">ID</th><th class="pb-2 text-left">Pair</th><th class="pb-2 text-left">Strategy</th><th class="pb-2 text-right">Gross P&amp;L</th><th class="pb-2 text-right">Commission</th><th class="pb-2 text-right">Net P&amp;L</th><th class="pb-2 text-left">Exit Reason</th><th class="pb-2 text-left">Mode</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="trade in (data.trades || [])" :key="trade.trade_id" class="trade-row border-b border-slate-800/30">
+                            <td class="py-1.5 text-slate-500 font-mono">{{ trade.trade_id }}</td>
+                            <td class="py-1.5 text-slate-300">{{ trade.pair_id }}</td>
+                            <td class="py-1.5 text-slate-400">{{ strategyName(trade.strategy) }}</td>
+                            <td class="py-1.5 text-right font-mono" :class="pnlColor(trade.gross_pnl)">${{ fmt4(trade.gross_pnl) }}</td>
+                            <td class="py-1.5 text-right font-mono text-slate-500">${{ fmt4(trade.commission) }}</td>
+                            <td class="py-1.5 text-right font-mono font-bold" :class="pnlColor(trade.combined_pnl)">${{ fmt4(trade.combined_pnl) }}</td>
+                            <td class="py-1.5 text-slate-400">{{ exitReasonTr(trade.exit_reason) }}</td>
+                            <td class="py-1.5"><span :class="trade.trading_mode === 'live' ? 'text-green-400' : 'text-yellow-400'" class="text-xs">{{ trade.trading_mode === 'live' ? 'Live' : 'Paper' }}</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div v-if="!data.trades?.length" class="text-slate-500 text-sm py-4 text-center">No trades yet</div>
+            </div>
+        </div>
+
+        <!-- Tab: Risk -->
+        <div v-if="activeTab === 'risk'" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div class="glass p-4">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Risk Limits</h2>
+                <div class="space-y-3">
+                    <div v-for="limit in riskLimits" :key="limit.label">
+                        <div class="flex justify-between text-xs mb-1">
+                            <span class="text-slate-400">{{ limit.label }}</span>
+                            <span class="font-mono" :class="limit.pct > 80 ? 'text-red-400' : limit.pct > 50 ? 'text-yellow-400' : 'text-green-400'">{{ limit.current }} / {{ limit.max }}</span>
+                        </div>
+                        <div class="w-full bg-slate-700 rounded-full h-2">
+                            <div class="h-2 rounded-full transition-all duration-500" :style="{width: Math.min(limit.pct, 100)+'%'}" :class="limit.pct > 80 ? 'bg-red-500' : limit.pct > 50 ? 'bg-yellow-500' : 'bg-sky-500'"></div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Correlation Matrix -->
+                <h3 class="text-sm font-bold text-sky-400 mt-4 mb-2">Correlation Matrix</h3>
+                <div v-if="Object.keys(data.correlation_matrix || {}).length > 0" class="overflow-x-auto">
+                    <table class="text-[10px]">
+                        <thead><tr><th></th><th v-for="p in Object.keys(data.correlation_matrix)" :key="p" class="p-1 text-slate-500">{{ p.split('/')[0].slice(0,3) }}</th></tr></thead>
+                        <tbody>
+                            <tr v-for="(row, p1) in data.correlation_matrix" :key="p1">
+                                <td class="p-1 text-slate-500">{{ p1.split('/')[0].slice(0,3) }}</td>
+                                <td v-for="(val, p2) in row" :key="p2" class="corr-cell" :style="{background: corrColor(val)}">{{ val.toFixed(2) }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div v-else class="text-slate-500 text-xs">Not enough data</div>
+            </div>
+            <div class="glass p-4">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Rejected Signals</h2>
+                <div class="space-y-2 max-h-64 overflow-y-auto">
+                    <div v-for="rej in (data.rejections || [])" :key="rej.time" class="text-xs p-2 rounded bg-red-500/5 border border-red-500/10">
+                        <div class="flex justify-between mb-1">
+                            <span class="text-red-400 font-medium">{{ rejectReasonTr(rej.reason) }}</span>
+                            <span class="text-slate-500">{{ fmtDateTime(rej.time) }}</span>
+                        </div>
+                        <span class="text-slate-400">{{ rej.pair_id }}</span>
+                    </div>
+                    <div v-if="!data.rejections?.length" class="text-slate-500 text-sm py-4 text-center">No rejections</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Strategies -->
+        <div v-if="activeTab === 'strategy'">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <div v-for="(perf, strategy) in strategyPerf" :key="strategy" class="glass p-4">
+                    <h2 class="text-sm font-bold mb-3" :class="{'text-purple-400': strategy === 'stat_arb', 'text-cyan-400': strategy === 'funding_arb', 'text-amber-400': strategy === 'momentum_div', 'text-pink-400': strategy === 'cross_exchange'}">{{ strategyName(strategy) }}</h2>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between"><span class="text-slate-400">Trades</span><span>{{ perf.count }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">Win Rate</span><span>%{{ perf.count > 0 ? (perf.wins / perf.count * 100).toFixed(1) : 0 }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">P&amp;L</span><span :class="pnlColor(perf.pnl)" class="font-mono">${{ fmt4(perf.pnl) }}</span></div>
+                    </div>
+                </div>
+            </div>
+            <!-- Monte Carlo -->
+            <div class="glass p-4 mb-4">
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="text-sm font-bold text-sky-400">Monte Carlo Simulation</h2>
+                    <button @click="runMonteCarlo" :disabled="mcLoading" :class="mcLoading ? 'bg-slate-600' : 'bg-sky-600 hover:bg-sky-500'" class="px-3 py-1 rounded text-xs font-bold transition">{{ mcLoading ? 'Computing...' : 'Simulate' }}</button>
+                </div>
+                <div v-if="!mcData" class="text-slate-500 text-sm text-center py-4">Min 5 trades required</div>
+                <div v-else-if="mcData.status === 'insufficient'" class="text-amber-400 text-sm text-center py-4">Insufficient trades: {{ mcData.trades }}/5</div>
+                <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div class="col-span-2 md:col-span-4 flex items-center gap-2 mb-1">
+                        <span v-if="mcData.is_valid" class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400 font-bold">PASSED</span>
+                        <span v-else class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 font-bold">FAILED</span>
+                    </div>
+                    <div class="p-3 rounded-lg bg-slate-800/50"><div class="text-xs text-slate-400 mb-1">Sharpe</div><div class="text-lg font-bold font-mono" :class="mcData.passes_sharpe ? 'text-green-400' : 'text-red-400'">{{ mcData.sharpe_ratio }}</div></div>
+                    <div class="p-3 rounded-lg bg-slate-800/50"><div class="text-xs text-slate-400 mb-1">Profit Probability</div><div class="text-lg font-bold font-mono">%{{ mcData.probability_of_profit }}</div></div>
+                    <div class="p-3 rounded-lg bg-slate-800/50"><div class="text-xs text-slate-400 mb-1">Ruin Probability</div><div class="text-lg font-bold font-mono" :class="mcData.passes_ruin ? 'text-green-400' : 'text-red-400'">%{{ mcData.probability_of_ruin }}</div></div>
+                    <div class="p-3 rounded-lg bg-slate-800/50"><div class="text-xs text-slate-400 mb-1">Avg Drawdown</div><div class="text-lg font-bold font-mono" :class="mcData.passes_drawdown ? 'text-green-400' : 'text-red-400'">%{{ mcData.mean_max_drawdown }}</div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Engine -->
+        <div v-if="activeTab === 'engine'" class="glass p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-sm font-bold text-sky-400">Engine Status</h2>
+                <button @click="fetchEngineStatus" class="px-3 py-1 rounded text-xs font-bold bg-slate-700 hover:bg-slate-600 transition">Refresh</button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-slate-400 border-b border-slate-700">
+                        <tr><th class="pb-2 text-left">Pair</th><th class="pb-2 text-left">Type</th><th class="pb-2 text-right">Tick</th><th class="pb-2 text-right">Remaining</th><th class="pb-2 text-right">Z-Score</th><th class="pb-2 text-right">HL</th><th class="pb-2 text-right">P-Value</th><th class="pb-2 text-center">5m</th><th class="pb-2 text-center">15m</th><th class="pb-2 text-center">Status</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="e in engineStatus" :key="e.pair" class="border-b border-slate-800/30">
+                            <td class="py-1.5 text-slate-300 font-medium">{{ e.pair }}</td>
+                            <td class="py-1.5"><span v-if="e.is_default" class="text-[10px] px-1 rounded bg-slate-700 text-slate-500">fixed</span><span v-else class="text-[10px] px-1 rounded bg-sky-900 text-sky-400">scanned</span></td>
+                            <td class="py-1.5 text-right font-mono text-slate-400">{{ e.ticks?.toLocaleString() }}</td>
+                            <td class="py-1.5 text-right font-mono" :class="e.is_ready ? 'text-green-400' : 'text-amber-400'">{{ e.is_ready ? '-' : Math.floor(e.warmup_remaining/3600) + 'h ' + Math.floor((e.warmup_remaining%3600)/60) + 'm' }}</td>
+                            <td class="py-1.5 text-right font-mono" :class="e.zscore != null ? (Math.abs(e.zscore) >= 2 ? 'text-amber-400' : 'text-slate-400') : 'text-slate-600'">{{ e.zscore != null ? e.zscore.toFixed(2) : '-' }}</td>
+                            <td class="py-1.5 text-right font-mono text-slate-400">{{ e.half_life != null ? e.half_life + 'm' : '-' }}</td>
+                            <td class="py-1.5 text-right font-mono" :class="e.coint_pvalue != null ? (e.coint_pvalue < 0.05 ? 'text-green-400' : 'text-red-400') : 'text-slate-600'">{{ e.coint_pvalue != null ? e.coint_pvalue.toFixed(4) : '-' }}</td>
+                            <td class="py-1.5 text-center"><span v-if="e.tf_5m_coint === true" class="text-green-400">OK</span><span v-else-if="e.tf_5m_coint === false" class="text-red-400">X</span><span v-else class="text-slate-600">-</span></td>
+                            <td class="py-1.5 text-center"><span v-if="e.tf_15m_coint === true" class="text-green-400">OK</span><span v-else-if="e.tf_15m_coint === false" class="text-red-400">X</span><span v-else class="text-slate-600">-</span></td>
+                            <td class="py-1.5 text-center"><span v-if="e.is_ready" class="inline-block w-2.5 h-2.5 rounded-full bg-green-400"></span><span v-else class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 pulse"></span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tab: Tools -->
+        <div v-if="activeTab === 'tools'" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div class="glass p-4">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Tools</h2>
+                <div class="space-y-3">
+                    <div class="p-3 rounded-lg bg-slate-800/50">
+                        <div class="flex items-center justify-between mb-3">
+                            <div><div class="text-sm font-medium">Pair Scanner</div><div class="text-xs text-slate-400">Find cointegrated pairs</div></div>
+                            <button @click="runScript('screen')" :disabled="scriptStatus.screen === 'running'" :class="scriptStatus.screen === 'running' ? 'bg-slate-600' : 'bg-sky-600 hover:bg-sky-500'" class="px-4 py-2 rounded text-xs font-bold transition">{{ scriptStatus.screen === 'running' ? 'Scanning...' : 'Scan' }}</button>
+                        </div>
+                        <div class="flex items-center gap-3 p-2 rounded bg-slate-900/50">
+                            <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="autoScan.enabled" @change="toggleAutoScan" class="w-4 h-4 rounded accent-sky-500"><span class="text-xs font-medium">Auto Scan</span></label>
+                            <select v-model="autoScan.interval" @change="toggleAutoScan" class="bg-slate-800 text-xs rounded px-2 py-1 border border-slate-700 text-slate-300"><option :value="5">5m</option><option :value="15">15m</option><option :value="30">30m</option><option :value="60">60m</option></select>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/50">
+                        <div><div class="text-sm font-medium">Backtest</div></div>
+                        <button @click="runScript('backtest')" :disabled="scriptStatus.backtest === 'running'" :class="scriptStatus.backtest === 'running' ? 'bg-slate-600' : 'bg-purple-600 hover:bg-purple-500'" class="px-4 py-2 rounded text-xs font-bold transition">{{ scriptStatus.backtest === 'running' ? 'Running...' : 'Test' }}</button>
+                    </div>
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/50">
+                        <div><div class="text-sm font-medium">Preflight</div></div>
+                        <button @click="runScript('preflight')" :disabled="scriptStatus.preflight === 'running'" :class="scriptStatus.preflight === 'running' ? 'bg-slate-600' : 'bg-amber-600 hover:bg-amber-500'" class="px-4 py-2 rounded text-xs font-bold transition">{{ scriptStatus.preflight === 'running' ? 'Running...' : 'Check' }}</button>
+                    </div>
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/50">
+                        <div><div class="text-sm font-medium">Clear Scan</div></div>
+                        <button @click="clearScreenedPairs" class="px-4 py-2 rounded text-xs font-bold bg-red-600/80 hover:bg-red-600 transition">Clear</button>
+                    </div>
+                    <div class="mt-4 p-3 rounded-lg border" :class="data.trading_mode === 'live' ? 'border-green-500/30 bg-green-500/5' : 'border-yellow-500/30 bg-yellow-500/5'">
+                        <div class="flex items-center justify-between">
+                            <div><div class="text-sm font-medium">Trading Mode</div><div class="text-xs text-slate-400">Current: <span :class="data.trading_mode === 'live' ? 'text-green-400 font-bold' : 'text-yellow-400 font-bold'">{{ data.trading_mode === 'live' ? 'LIVE' : 'PAPER' }}</span></div></div>
+                            <button v-if="data.trading_mode !== 'live'" @click="goLive" class="px-4 py-2 rounded text-xs font-bold bg-green-600 hover:bg-green-500 transition">Go Live</button>
+                            <button v-else @click="goPaper" class="px-4 py-2 rounded text-xs font-bold bg-yellow-600 hover:bg-yellow-500 transition">Go Paper</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="glass p-4">
+                <h2 class="text-sm font-bold text-sky-400 mb-3">Output</h2>
+                <div class="script-output p-3 rounded-lg text-slate-300">{{ scriptOutput || 'No tool executed yet.' }}</div>
+            </div>
+        </div>
+
+        <!-- Tab: Metrics -->
+        <div v-if="activeTab === 'metrics'" class="space-y-4 mb-4">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-bold text-sky-400">System Metrics (Last 6 Hours)</h2>
+                <button @click="loadMetrics" class="px-3 py-1 rounded text-xs font-bold bg-slate-700 hover:bg-slate-600 transition">Refresh</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="glass p-4">
+                    <h3 class="text-xs font-bold text-slate-400 mb-2">Ticks & Signals (Total)</h3>
+                    <div style="position:relative;height:200px;width:100%"><canvas ref="metricsChart1"></canvas></div>
+                </div>
+                <div class="glass p-4">
+                    <h3 class="text-xs font-bold text-slate-400 mb-2">Risk: Approved & Rejected (Total)</h3>
+                    <div style="position:relative;height:200px;width:100%"><canvas ref="metricsChart2"></canvas></div>
+                </div>
+                <div class="glass p-4">
+                    <h3 class="text-xs font-bold text-slate-400 mb-2">Executor: Orders & Positions</h3>
+                    <div style="position:relative;height:200px;width:100%"><canvas ref="metricsChart3"></canvas></div>
+                </div>
+                <div class="glass p-4">
+                    <h3 class="text-xs font-bold text-slate-400 mb-2">Service Uptime (sec)</h3>
+                    <div style="position:relative;height:200px;width:100%"><canvas ref="metricsChart4"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Settings -->
+        <div v-if="activeTab === 'settings'">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <!-- Risk Parameters -->
+                <div class="glass p-4">
+                    <h2 class="text-sm font-bold text-sky-400 mb-3">Risk Parameters</h2>
+                    <div class="space-y-3">
+                        <div v-for="(spec, key) in settingsParams" :key="key">
+                            <label class="text-xs text-slate-400 block mb-1">{{ settingsLabels[key] || key }}</label>
+                            <div v-if="spec.type === 'boolean'">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" v-model="settingsForm[key]" class="w-4 h-4 rounded accent-sky-500">
+                                    <span class="text-xs">{{ settingsForm[key] ? 'Active' : 'Inactive' }}</span>
+                                </label>
+                            </div>
+                            <input v-else type="number" v-model.number="settingsForm[key]" class="setting-input" :min="spec.min" :max="spec.max" :step="spec.type === 'float' ? 0.1 : 1">
+                        </div>
+                        <button @click="saveSettings" class="w-full py-2 rounded bg-sky-600 hover:bg-sky-500 text-xs font-bold transition">Save</button>
+                    </div>
+                </div>
+
+                <!-- API Key & Telegram -->
+                <div class="space-y-4">
+                    <!-- API Key Management -->
+                    <div class="glass p-4">
+                        <h2 class="text-sm font-bold text-sky-400 mb-3">API Key Management</h2>
+                        <div class="space-y-3">
+                            <div class="p-3 rounded bg-slate-800/50">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-sm font-medium">Binance</span>
+                                    <span v-if="apiKeys.binance?.has_key" class="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">Active</span>
+                                    <span v-else class="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400">Not Configured</span>
+                                </div>
+                                <input v-model="apiKeyForm.binance_api_key" type="text" class="setting-input mb-2" :placeholder="apiKeys.binance?.has_key ? apiKeys.binance.api_key_masked : 'Enter API Key'">
+                                <input v-model="apiKeyForm.binance_secret_key" type="password" class="setting-input" :placeholder="apiKeys.binance?.has_key ? '********' : 'Enter Secret Key'">
+                            </div>
+                            <div class="p-3 rounded bg-slate-800/50">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-sm font-medium">Bybit</span>
+                                    <span v-if="apiKeys.bybit?.has_key" class="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">Active</span>
+                                    <span v-else class="text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-500">Not Configured</span>
+                                </div>
+                                <input v-model="apiKeyForm.bybit_api_key" type="text" class="setting-input mb-2" :placeholder="apiKeys.bybit?.has_key ? apiKeys.bybit.api_key_masked : 'Enter API Key'">
+                                <input v-model="apiKeyForm.bybit_secret_key" type="password" class="setting-input" :placeholder="apiKeys.bybit?.has_key ? '********' : 'Enter Secret Key'">
+                            </div>
+                            <button @click="saveApiKeys" class="w-full py-2 rounded bg-sky-600 hover:bg-sky-500 text-xs font-bold transition">Save Keys</button>
+                        </div>
+                    </div>
+
+                    <!-- Telegram -->
+                    <div class="glass p-4">
+                        <h2 class="text-sm font-bold text-sky-400 mb-3">Telegram Notifications</h2>
+                        <div class="space-y-3">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" v-model="telegramForm.enabled" class="w-4 h-4 rounded accent-sky-500">
+                                <span class="text-xs font-medium">{{ telegramForm.enabled ? 'Active' : 'Inactive' }}</span>
+                            </label>
+                            <div><label class="text-xs text-slate-400 block mb-1">Bot Token</label><input v-model="telegramForm.bot_token" type="text" class="setting-input" placeholder="123456:ABC..."></div>
+                            <div><label class="text-xs text-slate-400 block mb-1">Chat ID</label><input v-model="telegramForm.chat_id" type="text" class="setting-input" placeholder="-100..."></div>
+                            <div class="flex gap-2">
+                                <button @click="saveTelegram" class="flex-1 py-2 rounded bg-sky-600 hover:bg-sky-500 text-xs font-bold transition">Save</button>
+                                <button @click="testTelegram" class="flex-1 py-2 rounded bg-green-600 hover:bg-green-500 text-xs font-bold transition">Send Test</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Change Password -->
+                    <div class="glass p-4">
+                        <h2 class="text-sm font-bold text-sky-400 mb-3">Change Password</h2>
+                        <div class="space-y-3">
+                            <input v-model="pwForm.old_password" type="password" class="setting-input" placeholder="Current password">
+                            <input v-model="pwForm.new_password" type="password" class="setting-input" placeholder="New password">
+                            <button @click="changePassword" class="w-full py-2 rounded bg-amber-600 hover:bg-amber-500 text-xs font-bold transition">Change</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Services -->
+        <div class="glass p-4 mb-4">
+            <h2 class="text-sm font-bold text-sky-400 mb-3">Services ({{ healthyCount }}/4)</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div v-for="(svc, name) in serviceList" :key="name" class="flex items-center justify-between p-2 rounded bg-slate-800/30">
+                    <div class="flex items-center gap-2">
+                        <div class="w-2.5 h-2.5 rounded-full" :class="svc.status === 'healthy' ? 'bg-green-400' : 'bg-red-400 pulse'"></div>
+                        <span class="text-xs text-slate-300">{{ serviceName(name) }}</span>
+                    </div>
+                    <span class="text-[10px]" :class="svc.status === 'healthy' ? 'text-green-400' : 'text-red-400'">{{ svc.status === 'healthy' ? 'Healthy' : 'Down' }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="text-center text-xs text-slate-600 py-4">H4wkQuant v2.0 | Mathematical Arbitrage Engine | Designed by H4wk | WS {{ wsStatus === 'connected' ? 'Connected' : 'Disconnected' }}</div>
+    </main>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
+
+createApp({
+    setup() {
+        // Auth
+        const isLoggedIn = ref(false);
+        const authToken = ref('');
+        const loginForm = ref({ username: 'admin', password: '' });
+        const loginError = ref('');
+        const toast = ref({ show: false, message: '', type: 'success' });
+
+        const showToast = (msg, type = 'success') => { toast.value = { show: true, message: msg, type }; setTimeout(() => toast.value.show = false, 3000); };
+
+        const authHeaders = () => ({ 'Authorization': `Bearer ${authToken.value}`, 'Content-Type': 'application/json' });
+        const authFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+
+        const login = async () => {
+            loginError.value = '';
+            try {
+                const r = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(loginForm.value) });
+                if (!r.ok) { const e = await r.json(); loginError.value = e.detail || 'Login failed'; return; }
+                const d = await r.json();
+                authToken.value = d.token;
+                localStorage.setItem('h4wq_token', d.token);
+                isLoggedIn.value = true;
+                initAfterLogin();
+            } catch (e) { loginError.value = 'Connection error'; }
+        };
+
+        const logout = () => { isLoggedIn.value = false; authToken.value = ''; localStorage.removeItem('h4wq_token'); };
+
+        // Data
+        const data = ref({ balance: { total_balance: 174, available_balance: 174 }, positions: {}, daily_pnl: 0, drawdown_pct: 0, kill_switch: { active: false }, services: {}, trades: [], signals: [], prices: {}, spreads: {}, trading_mode: 'paper', funding: {}, rejections: [], regime: { regime: 'NORMAL', volatility: 0, percentile: 50, allow_new_positions: true, warming_up: true }, correlation_matrix: {} });
+        const stats = ref({ wins: 0, losses: 0, total: 0, total_pnl: 0, by_strategy: {} });
+        const currentTime = ref('');
+        const wsStatus = ref('connecting');
+        const activeTab = ref('overview');
+        const tabs = [
+            { id: 'overview', label: 'Overview' }, { id: 'signals', label: 'Signals' }, { id: 'trades', label: 'Trades' },
+            { id: 'risk', label: 'Risk' }, { id: 'strategy', label: 'Strategies' }, { id: 'engine', label: 'Engine' },
+            { id: 'tools', label: 'Tools' }, { id: 'metrics', label: 'Metrics' }, { id: 'settings', label: 'Settings' },
+        ];
+        const equityChart = ref(null); const pnlChart = ref(null);
+        const scriptStatus = ref({}); const scriptOutput = ref('');
+        const autoScan = ref({ enabled: false, interval: 5, nextRun: null, nextRunText: '' });
+        const mcData = ref(null); const mcLoading = ref(false);
+        const engineStatus = ref([]);
+        const dbStatus = ref('unknown');
+        const metricsChart1 = ref(null); const metricsChart2 = ref(null);
+        const metricsChart3 = ref(null); const metricsChart4 = ref(null);
+        let mChart1 = null, mChart2 = null, mChart3 = null, mChart4 = null;
+        let autoScanTimer = null, ws = null, timeInterval = null, eqChartInstance = null, pnlChartInstance = null;
+        let equityHistory = [], lastStatsRefresh = 0;
+
+        // Settings
+        const settingsForm = ref({});
+        const settingsParams = ref({});
+        const settingsLabels = { zscore_entry: 'Z-Score Entry', zscore_exit: 'Z-Score Exit', half_life_max: 'Max Half-Life (min)', max_open_positions: 'Max Positions', default_leverage: 'Leverage', kelly_fraction: 'Kelly Fraction', paper_initial_balance: 'Paper Balance ($)', max_leg_size_usd: 'Max Position Size ($)', kalman_enabled: 'Kalman Filter', regime_detection_enabled: 'Regime Detection', funding_arb_enabled: 'Funding Arb', momentum_enabled: 'Momentum', multi_tf_enabled: 'Multi-Timeframe (5m/15m)', portfolio_corr_enabled: 'Correlation Check', warmup_seconds: 'Warmup Duration (sec)' };
+        const apiKeys = ref({ binance: {}, bybit: {} });
+        const apiKeyForm = ref({});
+        const telegramForm = ref({ enabled: false, bot_token: '', chat_id: '' });
+        const pwForm = ref({ old_password: '', new_password: '' });
+
+        // Computed
+        const healthyCount = computed(() => Object.values(data.value.services || {}).filter(s => s.status === 'healthy').length);
+        const posCount = computed(() => Object.keys(data.value.positions || {}).length);
+        const totalPnl = computed(() => stats.value.total_pnl || 0);
+        const totalTrades = computed(() => stats.value.total || 0);
+        const winRate = computed(() => stats.value.total > 0 ? (stats.value.wins / stats.value.total * 100).toFixed(1) : '0.0');
+
+        const warmup = computed(() => {
+            const startTs = data.value.engine_start_time;
+            if (!startTs) return { phase: 'cold', elapsed: '?' };
+            const elapsed = Math.floor(Date.now() / 1000 - startTs);
+            const h = Math.floor(elapsed / 3600); const m = Math.floor((elapsed % 3600) / 60);
+            const elapsedStr = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+            if (elapsed < 7200) return { phase: 'cold', elapsed: elapsedStr };
+            if (elapsed < 28800) return { phase: 'warming', elapsed: elapsedStr };
+            return { phase: 'stable', elapsed: elapsedStr };
+        });
+
+        const regimeBadge = computed(() => {
+            const r = data.value.regime;
+            if (!r || r.warming_up) return null;
+            const map = { 'DUSUK': { label: 'LOW', cls: 'bg-green-500/20 text-green-400' }, 'NORMAL': { label: 'NORMAL', cls: 'bg-sky-500/20 text-sky-400' }, 'YUKSEK': { label: 'HIGH', cls: 'bg-orange-500/20 text-orange-400' }, 'ASIRI': { label: 'EXTREME', cls: 'bg-red-500/20 text-red-400 animate-pulse' } };
+            return map[r.regime] || map['NORMAL'];
+        });
+
+        const serviceList = computed(() => {
+            const svcs = data.value.services || {};
+            if (Object.keys(svcs).length > 0) return svcs;
+            return { data_collector: { status: 'unknown' }, spread_engine: { status: 'unknown' }, risk_manager: { status: 'unknown' }, executor: { status: 'unknown' } };
+        });
+
+        const strategyPerf = computed(() => {
+            const perf = { stat_arb: { count: 0, wins: 0, pnl: 0 }, funding_arb: { count: 0, wins: 0, pnl: 0 }, momentum_div: { count: 0, wins: 0, pnl: 0 }, cross_exchange: { count: 0, wins: 0, pnl: 0 } };
+            const bs = stats.value.by_strategy || {};
+            for (const [s, d] of Object.entries(bs)) { if (perf[s]) { perf[s].count = d.count||0; perf[s].wins = d.wins||0; perf[s].pnl = d.pnl||0; } }
+            return perf;
+        });
+
+        const riskLimits = computed(() => {
+            const dd = data.value.drawdown_pct || 0;
+            const dailyPnl = Math.abs(data.value.daily_pnl || 0);
+            const bal = data.value.balance?.total_balance || 174;
+            const dailyLossMax = bal * 0.02;
+            const positions = posCount.value;
+            return [
+                { label: 'Drawdown', current: dd.toFixed(1) + '%', max: '%10', pct: dd / 10 * 100 },
+                { label: 'Daily Loss', current: '$' + dailyPnl.toFixed(2), max: '$' + dailyLossMax.toFixed(2), pct: dailyPnl / dailyLossMax * 100 },
+                { label: 'Open Position', current: positions, max: 6, pct: positions / 6 * 100 },
+                { label: 'Leverage', current: (positions * 3) + 'x', max: '18x', pct: positions * 3 / 18 * 100 },
+            ];
+        });
+
+        // Helpers
+        const strategyName = (s) => ({ stat_arb: 'Statistical Arb', funding_arb: 'Funding Arb', momentum_div: 'Momentum Divergence', cross_exchange: 'Cross-Exchange' }[s] || s);
+        const serviceName = (s) => ({ data_collector: 'Data Collector', spread_engine: 'Spread Engine', risk_manager: 'Risk Manager', executor: 'Trade Engine', watchdog: 'Watchdog' }[s] || s);
+        const exitReasonTr = (r) => ({ zscore_revert: 'Z-score reverted', zscore_blowup: 'Z-score blowup', zscore_cross: 'Z-score crossed', coint_break: 'Cointegration broke', funding_collected: 'Funding collected', spread_converged: 'Spread converged', timeout: 'Timeout', manual_close_all: 'Manual close' }[r] || r);
+        const rejectReasonTr = (r) => { if (!r) return ''; if (r.includes('below_min_size')) return 'Below min size'; if (r.includes('negative_edge')) return 'Negative edge'; if (r.includes('kill_switch')) return 'Emergency stop active'; if (r.includes('max_positions')) return 'Max position limit'; if (r.includes('already_in_position')) return 'Already in position'; if (r.includes('daily_loss')) return 'Daily loss limit'; if (r.includes('max_exposure')) return 'Max leverage'; if (r.includes('drawdown')) return 'Drawdown limit'; return r; };
+        const fmtDateTime = (ts) => { if (!ts) return ''; return new Date(typeof ts === 'number' ? ts * 1000 : ts).toLocaleString('en-US'); };
+        const fmt = (v) => v != null ? Number(v).toFixed(2) : '0.00';
+        const fmt4 = (v) => v != null ? Number(v).toFixed(4) : '0.0000';
+        const fmtTime = (ts) => { if (!ts) return ''; return new Date(typeof ts === 'number' ? ts * 1000 : ts).toLocaleTimeString(); };
+        const pnlColor = (v) => (v || 0) >= 0 ? 'text-green-400' : 'text-red-400';
+        const zscoreGradient = (z) => { const a = Math.abs(z); if (a >= 3) return 'linear-gradient(90deg, #ef4444, #dc2626)'; if (a >= 2) return 'linear-gradient(90deg, #f59e0b, #ef4444)'; if (a >= 1) return 'linear-gradient(90deg, #38bdf8, #f59e0b)'; return 'linear-gradient(90deg, #22c55e, #38bdf8)'; };
+        const posAge = (t) => { if (!t) return ''; const s = Math.floor(Date.now()/1000-t); if (s<60) return s+'s'; if (s<3600) return Math.floor(s/60)+'m'; return Math.floor(s/3600)+'h'; };
+        const corrColor = (v) => { const a = Math.abs(v); if (a > 0.7) return 'rgba(239,68,68,0.3)'; if (a > 0.4) return 'rgba(245,158,11,0.2)'; return 'rgba(34,197,94,0.1)'; };
+
+        // Actions
+        const runScript = async (name) => { scriptStatus.value[name] = 'running'; scriptOutput.value = name + ' starting...\n'; try { await authFetch(`/api/v1/run/${name}`, { method: 'POST' }); const poll = setInterval(async () => { const r = await authFetch(`/api/v1/run/output/${name}`); const d = await r.json(); scriptOutput.value = d.output || 'Running...'; if (d.status === 'finished') { clearInterval(poll); scriptStatus.value[name] = 'finished'; } }, 2000); } catch(e) { scriptOutput.value = 'Error: ' + e.message; scriptStatus.value[name] = 'error'; } };
+        const toggleKillSwitch = async () => { await authFetch(`/api/v1/kill-switch?active=${!data.value.kill_switch?.active}&reason=manuel`, { method: 'POST' }); };
+        const closeAllPositions = async () => { if (!confirm('Close all positions?')) return; await authFetch('/api/v1/close-all', { method: 'POST' }); };
+        const removeScreenedPair = async (pair) => { await authFetch(`/api/v1/screened-pair?pair=${encodeURIComponent(pair)}`, { method: 'DELETE' }); };
+        const clearScreenedPairs = async () => { if (!confirm('Clear scan results?')) return; await authFetch('/api/v1/screened-pairs', { method: 'DELETE' }); };
+        const goLive = async () => { if (!confirm('WARNING: Switching to live mode will trade with real money!')) return; if (!confirm('FINAL CONFIRMATION: Are you sure?')) return; await authFetch('/api/v1/trading-mode?mode=live', { method: 'POST' }); };
+        const goPaper = async () => { await authFetch('/api/v1/trading-mode?mode=paper', { method: 'POST' }); };
+
+        const toggleAutoScan = async () => {
+            if (autoScanTimer) { clearInterval(autoScanTimer); autoScanTimer = null; }
+            try { if (autoScan.value.enabled) { await fetch("/api/v1/autoscan/start", { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ interval_minutes: autoScan.value.interval }) }); } else { await fetch("/api/v1/autoscan/stop", { method: "POST", headers: authHeaders() }); } } catch(e) { console.error("autoscan api error", e); }
+            if (autoScan.value.enabled) { const ms = autoScan.value.interval * 60 * 1000; if (scriptStatus.value.screen !== 'running') runScript('screen'); autoScanTimer = setInterval(() => { if (scriptStatus.value.screen !== 'running') runScript('screen'); }, ms); }
+            // Backend handles persistence via Redis
+        };
+
+        const fetchEngineStatus = async () => { try { engineStatus.value = await (await authFetch('/api/v1/engine-status')).json(); } catch {} };
+        const fetchStats = async () => { try { stats.value = await (await authFetch('/api/v1/stats')).json(); } catch {} };
+        const fetchRisk = async () => { try { const d = await (await authFetch('/api/v1/risk')).json(); data.value.rejections = d.rejections || []; } catch {} };
+        const runMonteCarlo = async () => { mcLoading.value = true; try { mcData.value = await (await authFetch('/api/v1/montecarlo')).json(); } catch { mcData.value = null; } mcLoading.value = false; };
+
+        // Settings actions
+        const loadSettings = async () => { try { const d = await (await authFetch('/api/v1/settings')).json(); settingsForm.value = d.config || {}; settingsParams.value = d.params || {}; } catch {} };
+        const saveSettings = async () => { try { const r = await authFetch('/api/v1/settings', { method: 'POST', body: JSON.stringify(settingsForm.value) }); if (r.ok) showToast('Settings saved'); else showToast('Error: ' + (await r.json()).detail, 'error'); } catch (e) { showToast('Error', 'error'); } };
+        const loadApiKeys = async () => { try { apiKeys.value = await (await authFetch('/api/v1/settings/api-keys')).json(); } catch {} };
+        const saveApiKeys = async () => { try { const r = await authFetch('/api/v1/settings/api-keys', { method: 'POST', body: JSON.stringify(apiKeyForm.value) }); if (r.ok) { showToast('API keys saved'); loadApiKeys(); apiKeyForm.value = {}; } } catch {} };
+        const loadTelegram = async () => { try { telegramForm.value = await (await authFetch('/api/v1/settings/telegram')).json(); } catch {} };
+        const saveTelegram = async () => { try { await authFetch('/api/v1/settings/telegram', { method: 'POST', body: JSON.stringify(telegramForm.value) }); showToast('Telegram saved'); } catch {} };
+        const testTelegram = async () => { try { const r = await authFetch('/api/v1/settings/telegram/test', { method: 'POST' }); const d = await r.json(); showToast(d.message || d.status, d.status === 'ok' ? 'success' : 'error'); } catch (e) { showToast('Error', 'error'); } };
+        const changePassword = async () => { try { const r = await authFetch('/api/v1/auth/change-password', { method: 'POST', body: JSON.stringify(pwForm.value) }); if (r.ok) { showToast('Password changed'); pwForm.value = { old_password: '', new_password: '' }; } else { showToast((await r.json()).detail, 'error'); } } catch {} };
+        const checkDbStatus = async () => { try { const d = await (await authFetch('/api/v1/db-status')).json(); dbStatus.value = d.status; } catch { dbStatus.value = 'unknown'; } };
+
+        const makeLineChart = (ctx, datasets) => new Chart(ctx, { type: 'line', data: { labels: [], datasets }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } }, scales: { x: { display: true, ticks: { color: '#475569', font: { size: 9 }, maxTicksLimit: 8 } }, y: { grid: { color: 'rgba(100,116,139,0.1)' }, ticks: { color: '#64748b', font: { size: 10 } } } }, interaction: { intersect: false, mode: 'index' } } });
+
+        const loadMetrics = async () => {
+            try {
+                const raw = await (await authFetch('/api/v1/metrics/history?hours=6')).json();
+                if (!raw.length) return;
+                const sorted = raw.reverse();
+                const labels = sorted.map(d => { const dt = new Date(d.ts * 1000); return dt.getHours().toString().padStart(2,'0') + ':' + dt.getMinutes().toString().padStart(2,'0'); });
+                const get = (key) => sorted.map(d => d[key] || 0);
+
+                // Chart 1: Ticks & Signals
+                if (mChart1) mChart1.destroy();
+                const ctx1 = metricsChart1.value?.getContext('2d');
+                if (ctx1) { mChart1 = makeLineChart(ctx1, [
+                    { label: 'Ticks', data: get('spread_engine.h4wkquant_ticks_processed'), borderColor: '#38bdf8', borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: 'Signals', data: get('spread_engine.h4wkquant_signals_generated'), borderColor: '#a78bfa', borderWidth: 1.5, pointRadius: 0, fill: false },
+                ]); mChart1.data.labels = labels; mChart1.update('none'); }
+
+                // Chart 2: Approved & Rejected
+                if (mChart2) mChart2.destroy();
+                const ctx2 = metricsChart2.value?.getContext('2d');
+                if (ctx2) { mChart2 = makeLineChart(ctx2, [
+                    { label: 'Approved', data: get('risk_manager.h4wkquant_signals_approved'), borderColor: '#22c55e', borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: 'Rejected', data: get('risk_manager.h4wkquant_signals_rejected'), borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, fill: false },
+                ]); mChart2.data.labels = labels; mChart2.update('none'); }
+
+                // Chart 3: Orders & Positions
+                if (mChart3) mChart3.destroy();
+                const ctx3 = metricsChart3.value?.getContext('2d');
+                if (ctx3) { mChart3 = makeLineChart(ctx3, [
+                    { label: 'Orders', data: get('executor.h4wkquant_orders_executed'), borderColor: '#f59e0b', borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: 'Open Pos', data: get('executor.h4wkquant_positions_open'), borderColor: '#06b6d4', borderWidth: 1.5, pointRadius: 0, fill: false },
+                ]); mChart3.data.labels = labels; mChart3.update('none'); }
+
+                // Chart 4: Uptime
+                if (mChart4) mChart4.destroy();
+                const ctx4 = metricsChart4.value?.getContext('2d');
+                if (ctx4) { mChart4 = makeLineChart(ctx4, [
+                    { label: 'Spread Engine', data: get('spread_engine.h4wkquant_uptime_seconds'), borderColor: '#a78bfa', borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: 'Executor', data: get('executor.h4wkquant_uptime_seconds'), borderColor: '#f59e0b', borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: 'Data Collector', data: get('data_collector.h4wkquant_uptime_seconds'), borderColor: '#38bdf8', borderWidth: 1.5, pointRadius: 0, fill: false },
+                ]); mChart4.data.labels = labels; mChart4.update('none'); }
+            } catch(e) { console.error('Metrics load error', e); }
+        };
+
+        // Charts
+        const initCharts = () => {
+            const eqCtx = equityChart.value?.getContext('2d');
+            if (eqCtx) { eqChartInstance = new Chart(eqCtx, { type: 'line', data: { labels: [], datasets: [{ label: 'Equity ($)', data: [], borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: 'rgba(100,116,139,0.1)' }, ticks: { color: '#64748b', font: { size: 10 }, callback: v => '$'+v.toFixed(2) } } } } }); }
+            const pnlCtx = pnlChart.value?.getContext('2d');
+            if (pnlCtx) { pnlChartInstance = new Chart(pnlCtx, { type: 'bar', data: { labels: [], datasets: [{ label: 'P&L ($)', data: [], backgroundColor: [], borderRadius: 3 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: 'rgba(100,116,139,0.1)' }, ticks: { color: '#64748b', font: { size: 10 } } } } } }); }
+        };
+
+        const updateCharts = () => {
+            if (eqChartInstance) { equityHistory.push(data.value.balance?.total_balance || 174); if (equityHistory.length > 200) equityHistory.shift(); eqChartInstance.data.labels = equityHistory.map((_,i) => i); eqChartInstance.data.datasets[0].data = [...equityHistory]; eqChartInstance.update('none'); }
+            if (pnlChartInstance && data.value.trades?.length) { const trades = data.value.trades.slice(0,30).reverse(); pnlChartInstance.data.labels = trades.map((t,i) => i+1); pnlChartInstance.data.datasets[0].data = trades.map(t => t.combined_pnl||0); pnlChartInstance.data.datasets[0].backgroundColor = trades.map(t => (t.combined_pnl||0)>=0 ? 'rgba(34,197,94,0.7)' : 'rgba(239,68,68,0.7)'); pnlChartInstance.update('none'); }
+        };
+
+        const connectWS = () => {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+            ws.onopen = () => { wsStatus.value = 'connected'; ws.send(JSON.stringify({ token: authToken.value })); };
+            ws.onmessage = (e) => { try { const msg = JSON.parse(e.data); if (msg.event === 'dashboard') { data.value = { ...data.value, ...msg.data }; updateCharts(); } } catch {} };
+            ws.onclose = () => { wsStatus.value = 'disconnected'; setTimeout(connectWS, 3000); };
+            ws.onerror = () => ws.close();
+        };
+
+        const initAfterLogin = async () => {
+            connectWS();
+            try { data.value = await (await authFetch('/api/v1/dashboard')).json(); } catch {}
+            await fetchStats(); await fetchRisk();
+            await loadSettings(); await loadApiKeys(); await loadTelegram(); checkDbStatus();
+            await nextTick(); initCharts(); updateCharts();
+            try { fetch("/api/v1/autoscan/status").then(r => r.json()).then(cfg => { if (cfg.enabled) { autoScan.value.enabled = true; autoScan.value.interval = cfg.interval_minutes || 30; } }); } catch {};
+        };
+
+        const updateTime = () => { currentTime.value = new Date().toLocaleTimeString('en-US'); };
+
+        onMounted(() => {
+            updateTime();
+            timeInterval = setInterval(() => { updateTime(); const now = Date.now(); if (isLoggedIn.value && now - lastStatsRefresh > 10000) { lastStatsRefresh = now; fetchStats(); fetchRisk(); if (activeTab.value === 'engine') fetchEngineStatus(); if (activeTab.value === 'metrics') loadMetrics(); } }, 1000);
+
+            // Check saved token
+            const saved = localStorage.getItem('h4wq_token');
+            if (saved) {
+                authToken.value = saved;
+                // Verify token
+                fetch('/api/v1/stats', { headers: { Authorization: `Bearer ${saved}` } }).then(r => {
+                    if (r.ok) { isLoggedIn.value = true; initAfterLogin(); }
+                    else { localStorage.removeItem('h4wq_token'); }
+                }).catch(() => {});
+            }
+        });
+
+        onUnmounted(() => { if (ws) ws.close(); if (timeInterval) clearInterval(timeInterval); if (autoScanTimer) clearInterval(autoScanTimer); if (eqChartInstance) eqChartInstance.destroy(); if (pnlChartInstance) pnlChartInstance.destroy(); });
+
+        return {
+            isLoggedIn, loginForm, loginError, login, logout, toast,
+            data, stats, currentTime, wsStatus, activeTab, tabs, equityChart, pnlChart, warmup, regimeBadge, dbStatus,
+            healthyCount, posCount, totalPnl, totalTrades, winRate, serviceList, strategyPerf, riskLimits,
+            scriptStatus, scriptOutput, runScript, autoScan, toggleAutoScan, mcData, mcLoading, runMonteCarlo, engineStatus, fetchEngineStatus,
+            metricsChart1, metricsChart2, metricsChart3, metricsChart4, loadMetrics,
+            settingsForm, settingsParams, settingsLabels, saveSettings, loadSettings,
+            apiKeys, apiKeyForm, saveApiKeys, telegramForm, saveTelegram, testTelegram, pwForm, changePassword,
+            fmt, fmt4, fmtTime, pnlColor, zscoreGradient, posAge, corrColor,
+            strategyName, serviceName, exitReasonTr, rejectReasonTr, fmtDateTime,
+            toggleKillSwitch, closeAllPositions, goLive, goPaper, removeScreenedPair, clearScreenedPairs,
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>

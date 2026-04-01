@@ -1,0 +1,11 @@
+.git
+.env
+*.pyc
+__pycache__
+data/
+logs/
+*.log
+.pytest_cache
+.vscode
+.idea
+backup/

@@ -1,0 +1,199 @@
+version: "3.8"
+
+services:
+  # ============================================================
+  # Infrastructure
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"  # 6380 to avoid conflict with H4wkTrading
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: h4wk
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: h4wk_quant
+    ports:
+      - "5434:5432"  # 5434 (H4wkTrading uses 5432/5433)
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U h4wk -d h4wk_quant"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================================
+  # Services
+  # ============================================================
+  data_collector:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.data_collector
+    environment:
+      SERVICE_NAME: data_collector
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      BINANCE_API_KEY: ${BINANCE_API_KEY}
+      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY}
+    ports:
+      - "9101:9101"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9101/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  spread_engine:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.spread_engine
+    environment:
+      SERVICE_NAME: spread_engine
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "9102:9102"
+    depends_on:
+      redis:
+        condition: service_healthy
+      data_collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9102/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  risk_manager:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.risk_manager
+    environment:
+      SERVICE_NAME: risk_manager
+      REDIS_URL: redis://redis:6379/1
+    ports:
+      - "9103:9103"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9103/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+
+  executor:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.executor
+    environment:
+      SERVICE_NAME: executor
+      REDIS_URL: redis://redis:6379/1
+      DB_POSTGRES_HOST: postgres
+      DB_POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-changeme}
+      BINANCE_API_KEY: ${BINANCE_API_KEY}
+      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+    ports:
+      - "9104:9104"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9104/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  watchdog:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.watchdog
+    environment:
+      SERVICE_NAME: watchdog
+      REDIS_URL: redis://redis:6379/1
+      MONITOR_TELEGRAM_ENABLED: ${MONITOR_TELEGRAM_ENABLED:-false}
+      MONITOR_TELEGRAM_BOT_TOKEN: ${MONITOR_TELEGRAM_BOT_TOKEN:-}
+      MONITOR_TELEGRAM_CHAT_ID: ${MONITOR_TELEGRAM_CHAT_ID:-}
+    ports:
+      - "9105:9105"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9105/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+
+  panel:
+    build:
+      context: ../..
+      dockerfile: infra/docker/services/Dockerfile.panel
+    environment:
+      SERVICE_NAME: panel
+      REDIS_URL: redis://redis:6379/1
+      PANEL_SECRET_KEY: ${PANEL_SECRET_KEY:-default_secret}
+    ports:
+      - "8180:8180"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+
+volumes:
+  redis_data:
+  pg_data:

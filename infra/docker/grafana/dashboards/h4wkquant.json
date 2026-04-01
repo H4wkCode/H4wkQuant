@@ -1,0 +1,87 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Ticks Processed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "h4wkquant_ticks_processed", "legendFormat": "{{job}}" }
+      ]
+    },
+    {
+      "title": "Signals Generated",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "h4wkquant_signals_generated", "legendFormat": "{{job}}" }
+      ]
+    },
+    {
+      "title": "Orders Executed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "h4wkquant_orders_executed", "legendFormat": "" }
+      ]
+    },
+    {
+      "title": "Positions Open",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        { "expr": "h4wkquant_positions_open", "legendFormat": "" }
+      ]
+    },
+    {
+      "title": "Signals Approved vs Rejected",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "h4wkquant_signals_approved", "legendFormat": "approved" },
+        { "expr": "h4wkquant_signals_rejected", "legendFormat": "rejected" }
+      ]
+    },
+    {
+      "title": "WS Reconnections",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "h4wkquant_ws_reconnects", "legendFormat": "" }
+      ]
+    },
+    {
+      "title": "Health Checks",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 12 },
+      "targets": [
+        { "expr": "h4wkquant_health_checks_ok", "legendFormat": "ok" },
+        { "expr": "h4wkquant_health_checks_fail", "legendFormat": "fail" }
+      ]
+    },
+    {
+      "title": "Service Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "h4wkquant_uptime_seconds", "legendFormat": "{{job}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["h4wkquant"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "H4wkQuant Overview",
+  "uid": "h4wkquant-main"
+}
